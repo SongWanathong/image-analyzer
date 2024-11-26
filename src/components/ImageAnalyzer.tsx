@@ -1,4 +1,3 @@
-/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useState, useRef } from "react";
@@ -7,6 +6,8 @@ interface Analysis {
 	title: string;
 	description: string;
 	keywords: string;
+	show: string;
+	categoryId: string;
 }
 
 interface ImageAnalysis {
@@ -14,6 +15,7 @@ interface ImageAnalysis {
 	analysis: Analysis | null;
 	fileName?: string;
 	folderPath?: string;
+	category?: string;
 }
 
 export default function ImageAnalyzer() {
@@ -62,12 +64,10 @@ export default function ImageAnalyzer() {
 	const processFiles = async (files: File[]) => {
 		setLoading(true);
 		try {
-			const newImages: ImageAnalysis[] = [];
-
-			for (const file of files) {
-				if (!isImageFile(file)) continue;
-
-				try {
+			// First, prepare all files in parallel
+			const filePromises = Array.from(files)
+				.filter(isImageFile)
+				.map(async (file) => {
 					const localUrl = URL.createObjectURL(file);
 					const base64 = await new Promise<string>((resolve, reject) => {
 						const reader = new FileReader();
@@ -80,17 +80,6 @@ export default function ImageAnalyzer() {
 						reader.readAsDataURL(file);
 					});
 
-					const response = await fetch("/api/analyze", {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ imageUrl: base64 }),
-					});
-
-					if (!response.ok) {
-						throw new Error(`Failed to analyze image: ${file.name}`);
-					}
-
-					const analysisData = await response.json();
 					const pathParts = file.webkitRelativePath
 						? file.webkitRelativePath.split("/")
 						: [file.name];
@@ -98,19 +87,44 @@ export default function ImageAnalyzer() {
 					const folderPath =
 						pathParts.length > 0 ? pathParts.join("/") : "Ungrouped";
 
-					newImages.push({
-						imageUrl: localUrl,
-						analysis: analysisData,
-						fileName,
-						folderPath,
-					});
-				} catch (error) {
-					console.error(`Error processing file ${file.name}:`, error);
-					// Continue processing other files
-				}
-			}
+					return { base64, localUrl, fileName, folderPath };
+				});
 
-			setImages((prev) => [...prev, ...newImages]);
+			// Wait for all file preparations to complete
+			const preparedFiles = await Promise.all(filePromises);
+
+			// Process each file independently and update state as results come in
+			// biome-ignore lint/complexity/noForEach: <explanation>
+			preparedFiles.forEach((file) => {
+				fetch("/api/analyze", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ imageUrl: file.base64 }),
+				})
+					.then((response) => {
+						if (!response.ok) {
+							throw new Error(`Failed to analyze image: ${file.fileName}`);
+						}
+						return response.json();
+					})
+					.then((analysisData) => {
+						const newImage = {
+							imageUrl: file.localUrl,
+							analysis: analysisData,
+							fileName: file.fileName,
+							folderPath: file.folderPath,
+							category: analysisData.categoryId,
+						};
+
+						// Update UI immediately when each analysis completes
+						setImages((prev) => [...prev, newImage]);
+						setLoading(false);
+					})
+					.catch((error) => {
+						console.error("Error analyzing image:", error);
+						setLoading(false);
+					});
+			});
 		} catch (error) {
 			console.error("Error:", error);
 			alert("Failed to analyze one or more images");
@@ -149,6 +163,55 @@ export default function ImageAnalyzer() {
 		},
 		{} as Record<string, ImageAnalysis[]>,
 	);
+
+	const handleDownloadCSV = () => {
+		// Prepare CSV header
+		const headers = [
+			"Filename",
+			"Title",
+			"Description",
+			"Keywords",
+			"Category",
+		];
+		const csvRows = [headers];
+
+		// Convert all images data to CSV format
+		// biome-ignore lint/complexity/noForEach: <explanation>
+		Object.values(groupedImages).forEach((folderImages) => {
+			// biome-ignore lint/complexity/noForEach: <explanation>
+			folderImages.forEach((img) => {
+				const row = [
+					img.fileName || "",
+					img.analysis?.title || "",
+					img.analysis?.description || "",
+					img.analysis?.keywords || "",
+					String(img.analysis?.categoryId || ""),
+				];
+				csvRows.push(row);
+			});
+		});
+
+		// Convert to CSV string
+		const csvContent = csvRows
+			.map((row) =>
+				row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","),
+			)
+			.join("\n");
+
+		// Create and trigger download
+		const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+		const link = document.createElement("a");
+		const url = URL.createObjectURL(blob);
+		link.setAttribute("href", url);
+		link.setAttribute(
+			"download",
+			`image-analysis-${new Date().toISOString().split("T")[0]}.csv`,
+		);
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+		URL.revokeObjectURL(url);
+	};
 
 	return (
 		<div className="space-y-8">
@@ -268,33 +331,71 @@ export default function ImageAnalyzer() {
 
 			{Object.entries(groupedImages).map(([folderPath, folderImages]) => (
 				<div key={folderPath} className="space-y-4">
-					<h3 className="text-xl font-semibold text-gray-800 border-b pb-2">
-						{folderPath}
-					</h3>
+					<div className="flex justify-between items-center border-b pb-2">
+						<h3 className="text-xl font-semibold text-gray-800">
+							{folderPath}
+						</h3>
+						<button
+							onClick={handleDownloadCSV}
+							className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-md shadow-sm transition-colors"
+							title="Download CSV"
+							type="button"
+						>
+							{/* biome-ignore lint/a11y/noSvgWithoutTitle: <explanation> */}
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								className="h-5 w-5 mr-2"
+								viewBox="0 0 20 20"
+								fill="currentColor"
+							>
+								<path
+									fillRule="evenodd"
+									d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+									clipRule="evenodd"
+								/>
+							</svg>
+							Download CSV
+						</button>
+					</div>
 					<div className="overflow-x-auto shadow-md rounded-lg">
 						<table className="min-w-full table-auto">
 							<thead className="bg-gray-50">
 								<tr>
-									<th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 min-w-[12rem]">
+									<th
+										scope="col"
+										className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48 min-w-[12rem]"
+									>
 										Image
 									</th>
-									<th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider min-w-[20rem]">
+									<th
+										scope="col"
+										className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider min-w-[20rem]"
+									>
 										Title & Description
 									</th>
-									<th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider min-w-[16rem]">
+									<th
+										scope="col"
+										className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider min-w-[16rem]"
+									>
 										Keywords
 									</th>
-									<th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
+									<th
+										scope="col"
+										className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20"
+									>
 										Actions
 									</th>
 								</tr>
 							</thead>
 							<tbody className="bg-white divide-y divide-gray-200">
 								{folderImages.map((img, index) => (
-									<tr key={`${folderPath}-${
-										// biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
-										index
-									}`} className="hover:bg-gray-50">
+									<tr
+										key={`${folderPath}-${
+											// biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+											index
+										}`}
+										className="hover:bg-gray-50"
+									>
 										<td className="px-6 py-4">
 											<div className="relative w-40 h-40 mx-auto">
 												<img
@@ -320,7 +421,7 @@ export default function ImageAnalyzer() {
 										<td className="px-6 py-4">
 											<div className="max-h-[12rem] overflow-y-auto custom-scrollbar">
 												<div className="flex flex-wrap gap-1">
-													{img.analysis?.keywords.split(",").map((keyword, i) => (
+													{img.analysis?.show.split(",").map((keyword, i) => (
 														<span
 															key={`${folderPath}-${index}-${
 																// biome-ignore lint/suspicious/noArrayIndexKey: <explanation>

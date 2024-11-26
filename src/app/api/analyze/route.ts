@@ -43,9 +43,7 @@ export async function POST(req: Request) {
 			max_tokens: 4000,
 			temperature: 0.8,
 		});
-		console.log(response);
 		const result = response.choices[0]?.message?.content;
-		console.log(response.choices[0]);
 		if (!result) {
 			throw new Error("No response from OpenAI");
 		}
@@ -66,13 +64,43 @@ export async function POST(req: Request) {
 			.filter((k) => k.length > 0)
 			.join(",");
 
+		// Fetch additional keywords from imstocker API
+		const imstockerResponse = await fetch(
+			"https://api.imstocker.com/api/keyword/getKeywordsByTitles",
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					title_keywords: keywords.split(","),
+				}),
+			},
+		);
+
+		const imstockerData = await imstockerResponse.json();
+
+		// Get top 25 keywords sorted by result_rank
+		const topKeywords = imstockerData.res
+			// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+			.sort((a: any, b: any) => b.result_rank - a.result_rank)
+			.slice(0, 25);
+
 		const analysis = {
 			title: titleMatch[1],
 			description: descriptionMatch[1],
-			keywords: keywords,
+			// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+			keywords: topKeywords.map((item: any) => item.title_keyword).join(","),
+			// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+			show: topKeywords
+				.map(
+					// biome-ignore lint/suspicious/noExplicitAny: <explanation>
+					(item: any) =>
+						`${item.title_keyword} (${Number(item.result_rank).toFixed(3)})`,
+				)
+				.join(", "),
 			categoryId: Number(categoryMatch[1]),
 		};
-
 		return NextResponse.json(analysis);
 	} catch (error) {
 		console.error("Error analyzing image:", error);
